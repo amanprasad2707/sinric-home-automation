@@ -12,6 +12,9 @@
   #include <WiFi.h>
 #endif
 
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "SinricPro.h"
 #include "SinricProSwitch.h"
 #include "SinricProTemperaturesensor.h"
@@ -22,8 +25,8 @@
 
 #define WIFI_SSID1         "VIRUS"
 #define WIFI_PASS1         "VIRUS123"
-#define WIFI_SSID2         "VIRUS"
-#define WIFI_PASS2         "VIRUS123"
+#define WIFI_SSID2         "SENSAFE"
+#define WIFI_PASS2         "SENSAFE123"
 #define APP_KEY           "09c154f8-03be-4c2d-a162-52e518479173"
 #define APP_SECRET        "1eb13d4f-9990-4d97-aaf9-b482e870824f-464779c7-0892-4b52-b94f-f063b9d2f118"
 #define TEMP_SENSOR_ID    "67fbd0c7947cbabd20fb0cd9"
@@ -33,7 +36,11 @@
 #define EEPROM_SIZE 512   // Define the size of EEPROM to store relay states
 #define RELAY_STATE_ADDR_START 0 // Starting address in EEPROM for relay states
 
+#define SCREEN_WIDTH 128 // OLED width
+#define SCREEN_HEIGHT 64 // OLED height
 
+#define OLED_RESET -1 // Reset pin (not used)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // comment the following line if you use a toggle switches instead of tactile buttons
 #define TACTILE_BUTTON 1
@@ -41,12 +48,10 @@
 #define BAUD_RATE   115200
 #define DEBOUNCE_TIME 250
 #define RELAYPIN_1 16  // D0
-#define RELAYPIN_2 5   // D1
-#define SWITCHPIN_1 4  // D2
+#define RELAYPIN_2 3   // RX
+#define SWITCHPIN_1 12  // D6
 #define SWITCHPIN_2 0  // D3
 #define DHT_PIN     2  // D4
-#define WIFI_STATUS_CONNECTED_LED 14  // D5
-#define WIFI_STATUS_DISCONNECTED_LED 12  // D6
 #define IR_REC_PIN 13  // D7
 
 
@@ -216,8 +221,21 @@ void handleTemperaturesensor() {
     // Serial.println(temperature);
   if (isnan(temperature) || isnan(humidity)) { // reading failed... 
     Serial.printf("DHT reading failed!\r\n");  // print error message
-    return;                                    // try again next time
-  } 
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 2);
+    display.println("DHT is not \n connected");                              // try again next time
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 2);
+  display.print("Temperature: ");
+  display.print(temperature);
+  display.println(" C\n");
+  display.print("Humidity: ");
+  display.print(humidity);
+  display.println("\n");
+  display.display();
 
   if (temperature == lastTemperature || humidity == lastHumidity) return; // if no values changed do nothing...
 
@@ -237,11 +255,6 @@ void handleTemperaturesensor() {
 
 void setupWiFi() {
   Serial.printf("\r\n[Wifi]: Connecting");
-
-  pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
-  digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
-  pinMode(WIFI_STATUS_DISCONNECTED_LED, OUTPUT);
-  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
 
   #if defined(ESP8266)
     WiFi.setSleepMode(WIFI_NONE_SLEEP); 
@@ -282,15 +295,12 @@ void setupWiFi() {
   // If still not connected, indicate failure
   if (WiFi.status() != WL_CONNECTED) {
     Serial.printf("\r\n[Wifi]: Failed to connect to both networks.\r\n");
-    digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
     return;
   }
 
   // If connected, display the IP address and update LED status
   Serial.printf("Connected to WiFi network: %s\r\n", WiFi.SSID().c_str());
   Serial.printf("[WiFi]: IP Address: %s\r\n", WiFi.localIP().toString().c_str());
-  digitalWrite(WIFI_STATUS_CONNECTED_LED, HIGH);
-  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, LOW);
 }
 
 
@@ -326,12 +336,8 @@ void setupSinricPro() {
   SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];
   // setup SinricPro
   SinricPro.onConnected([](){ Serial.printf("Connected to SinricPro\r\n");
-  digitalWrite(WIFI_STATUS_CONNECTED_LED, HIGH);
-  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, LOW);
   }); 
   SinricPro.onDisconnected([](){ Serial.printf("Disconnected from SinricPro\r\n");
-    digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW); // Turn off LED when disconnected
-    digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH); // Turn off LED when disconnected
 
    });
   for (auto &device : devices) {
@@ -345,18 +351,32 @@ void setupSinricPro() {
 }
 
 void setup() {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // 0x3C is I2C address
+    Serial.println(F("SSD1306 allocation failed"));
+    return;
+  }
+  display.clearDisplay();
+  // Set text size and color
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  // Set cursor to top-left
+  display.setCursor(0, 0);
+  // Display text
+  display.println("Booting...");
+  display.display();
+
   Serial.begin(BAUD_RATE);
   EEPROM.begin(EEPROM_SIZE);                 // Initialize EEPROM
-  pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);        // Set LED pin as OUTPUT
-  digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);     // Ensure LED is off at startup
-  pinMode(WIFI_STATUS_DISCONNECTED_LED, OUTPUT);        // Set LED pin as OUTPUT
-  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);     // Ensure LED is off at startup
   setupRelays();
   setupFlipSwitches();
   dht.begin();
   setupWiFi();
   setupSinricPro();
   irrecv.enableIRIn();
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Welcome...");
+  display.display();
 }
 
 void loop() {
