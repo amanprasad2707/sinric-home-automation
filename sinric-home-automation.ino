@@ -21,17 +21,22 @@
 #include <EEPROM.h>
 #include <IRrecv.h>
 #include <map>
-#include <WiFiManager.h> 
+#include <WiFiManager.h>
 
-#define WIFI_SSID1         ""
-#define WIFI_PASS1         ""
-#define WIFI_SSID2         ""
-#define WIFI_PASS2         ""
+
+char WIFI_SSID1[32] = "";
+char WIFI_PASS1[64] = "";
+char WIFI_SSID2[32] = "";
+char WIFI_PASS2[64] = "";
+
+
+
 #define APP_KEY           ""
 #define APP_SECRET        ""
 #define TEMP_SENSOR_ID    ""
 #define DEVICE_ID_1       ""
 #define DEVICE_ID_2       ""
+
 #define EVENT_WAIT_TIME   10000               // send event every 10 seconds
 #define EEPROM_SIZE 512   // Define the size of EEPROM to store relay states
 #define RELAY_STATE_ADDR_START 0 // Starting address in EEPROM for relay states
@@ -43,14 +48,29 @@
 #define RELAYPIN_1 16  // D0
 #define RELAYPIN_2 5   // D1
 #define SWITCHPIN_1 4  // D2
-#define SWITCHPIN_2 0  // D3
+#define SWITCHPIN_2 3  // rx
 #define DHT_PIN     2  // D4
 #define WIFI_STATUS_CONNECTED_LED 14  // D5
 #define WIFI_STATUS_DISCONNECTED_LED 12  // D6
 #define IR_REC_PIN 13  // D7
 
+#define CONFIG_BUTTON_PIN 0   // D3
+unsigned long buttonPressStart = 0;
+bool configModeActive = false;
+const unsigned long longPressTime = 10000UL; // 10 seconds
+
+unsigned long lastWiFiHandle = 0;
+const unsigned long wifiHandleInterval = 180000UL; // 3 minutes
 
 
+// Custom WiFiManager parameters for two SSIDs
+WiFiManagerParameter custom_ssid1("ssid1", "SSID1", "", 32);
+WiFiManagerParameter custom_pass1("pass1", "Password1", "", 64);
+WiFiManagerParameter custom_ssid2("ssid2", "SSID2", "", 32);
+WiFiManagerParameter custom_pass2("pass2", "Password2", "", 64);
+#define EEPROM_WIFI_START 200  // pick an address far from your relay storage (0–99 used for relays, for example)
+
+WiFiManager wm;
 
 
 IRrecv irrecv(IR_REC_PIN);
@@ -102,6 +122,32 @@ bool readRelayStateFromEEPROM(int relayIndex) {
   int address = RELAY_STATE_ADDR_START + relayIndex;
   return EEPROM.read(address);
 }
+
+
+void loadWiFiFromEEPROM() {
+  Serial.println("loading wifi from eeprom: ");
+
+  EEPROM.get(EEPROM_WIFI_START + 0, WIFI_SSID1);
+  EEPROM.get(EEPROM_WIFI_START + 32, WIFI_PASS1);
+  EEPROM.get(EEPROM_WIFI_START + 96, WIFI_SSID2);
+  EEPROM.get(EEPROM_WIFI_START + 160, WIFI_PASS2);
+
+  Serial.println("loading wifi from eeprom: ");
+  // // fallback if EEPROM empty
+  // if (strlen(WIFI_SSID1) == 0) strcpy(WIFI_SSID1, "VIRUS");
+  // if (strlen(WIFI_PASS1) == 0) strcpy(WIFI_PASS1, "VIRUS123");
+  // if (strlen(WIFI_SSID2) == 0) strcpy(WIFI_SSID2, "Aman");
+  // if (strlen(WIFI_PASS2) == 0) strcpy(WIFI_PASS2, "VIRUS123");
+}
+
+void saveWiFiToEEPROM() {
+  EEPROM.put(EEPROM_WIFI_START + 0, WIFI_SSID1);
+  EEPROM.put(EEPROM_WIFI_START + 32, WIFI_PASS1);
+  EEPROM.put(EEPROM_WIFI_START + 96, WIFI_SSID2);
+  EEPROM.put(EEPROM_WIFI_START + 160, WIFI_PASS2);
+  EEPROM.commit();
+}
+
 
 // ===================== RELAY & FLIP SWITCH SETUP =====================
 void setupRelays() { 
@@ -200,6 +246,11 @@ void setupWiFi() {
 #ifdef SERIAL_DEBUG
   Serial.printf("\r\n[Wifi]: Starting connect (non-blocking)\r\n");
 #endif
+  Serial.print(" before restoring SSID: ");
+  Serial.println(WIFI_SSID1);
+  loadWiFiFromEEPROM(); // restore last saved SSID/password
+  Serial.print("After restoring SSID: ");
+  Serial.println(WIFI_SSID1);
 
   // pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
   digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
@@ -213,7 +264,8 @@ void setupWiFi() {
   WiFi.setSleep(false); 
   WiFi.setAutoReconnect(true);
 #endif
-
+  Serial.print("SSID: ");
+  Serial.println(WIFI_SSID1);
   WiFi.begin(WIFI_SSID1, WIFI_PASS1);
   wifiAttemptStart = millis();
   wifiTriedFirst = true;
@@ -320,6 +372,51 @@ void IRAM_ATTR isrButton2() {
 
 
 
+// ===================== SETUP WiFiManager =====================
+void setupWiFiManager() {
+  pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);  // active low button
+  wm.setConfigPortalTimeout(180); // 3 minutes
+  wm.addParameter(&custom_ssid1);
+  wm.addParameter(&custom_pass1);
+  wm.addParameter(&custom_ssid2);
+  wm.addParameter(&custom_pass2);
+}
+
+void checkConfigButton() {
+  if (digitalRead(CONFIG_BUTTON_PIN) == LOW) {
+    if (buttonPressStart == 0) buttonPressStart = millis();
+    else if (!configModeActive && millis() - buttonPressStart > longPressTime) {
+      configModeActive = true;
+#ifdef SERIAL_DEBUG
+      Serial.println("Entering WiFi config portal...");
+#endif
+      if (!wm.startConfigPortal("ESP_Config")) {
+#ifdef SERIAL_DEBUG
+        Serial.println("Config portal timeout, restarting...");
+#endif
+        ESP.restart();
+      }
+
+      // save new credentials
+      strncpy(WIFI_SSID1, custom_ssid1.getValue(), sizeof(WIFI_SSID1));
+      strncpy(WIFI_PASS1, custom_pass1.getValue(), sizeof(WIFI_PASS1));
+      strncpy(WIFI_SSID2, custom_ssid2.getValue(), sizeof(WIFI_SSID2));
+      strncpy(WIFI_PASS2, custom_pass2.getValue(), sizeof(WIFI_PASS2));
+      saveWiFiToEEPROM();
+
+      configModeActive = false;
+      buttonPressStart = 0;
+    }
+  } else {
+    buttonPressStart = 0;
+  }
+}
+
+
+
+
+
+
 
 
 // ===================== SETUP =====================
@@ -342,24 +439,32 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(SWITCHPIN_1), isrButton1, FALLING);
   attachInterrupt(digitalPinToInterrupt(SWITCHPIN_2), isrButton2, FALLING);
 
+  // Setup WiFiManager
+  setupWiFiManager(); 
+
   setupWiFi();
   setupSinricPro();
   irrecv.enableIRIn();
 }
 
-unsigned long lastWiFiHandle = 0;
-const unsigned long wifiHandleInterval = 180000UL; // 3 minutes
+
+
+
+
 // ===================== LOOP =====================
 
 void loop() {
   SinricPro.handle();
-
+  
   // Run handleWiFi() every 3 minutes (non-blocking)
   unsigned long now = millis();
   if (now - lastWiFiHandle >= wifiHandleInterval) {
     handleWiFi();
     lastWiFiHandle = now;
   }
+
+  // Check if config button is held
+  checkConfigButton();  
 
   if (buttonPressedFlag1) {
     buttonPressedFlag1 = false;
