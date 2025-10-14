@@ -1,9 +1,11 @@
-#define ENABLE_DEBUG
+// #define ENABLE_DEBUG
 #ifdef ENABLE_DEBUG
   #define DEBUG_ESP_PORT Serial
   #define NODEBUG_WEBSOCKETS
   #define NDEBUG
 #endif 
+
+#define SERIAL_DEBUG
 
 #include <Arduino.h>
 #if defined(ESP8266)
@@ -12,9 +14,6 @@
   #include <WiFi.h>
 #endif
 
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include "SinricPro.h"
 #include "SinricProSwitch.h"
 #include "SinricProTemperaturesensor.h"
@@ -22,37 +21,36 @@
 #include <EEPROM.h>
 #include <IRrecv.h>
 #include <map>
+#include <WiFiManager.h> 
 
-#define WIFI_SSID1         "VIRUS"
-#define WIFI_PASS1         "VIRUS123"
-#define WIFI_SSID2         "SENSAFE"
-#define WIFI_PASS2         "SENSAFE123"
-#define APP_KEY           "09c154f8-03be-4c2d-a162-52e518479173"
-#define APP_SECRET        "1eb13d4f-9990-4d97-aaf9-b482e870824f-464779c7-0892-4b52-b94f-f063b9d2f118"
-#define TEMP_SENSOR_ID    "67fbd0c7947cbabd20fb0cd9"
-#define DEVICE_ID_1    "67fbd015947cbabd20fb0b4e"
-#define DEVICE_ID_2    "67fbd0978ed485694c1664ce"
+#define WIFI_SSID1         ""
+#define WIFI_PASS1         ""
+#define WIFI_SSID2         ""
+#define WIFI_PASS2         ""
+#define APP_KEY           ""
+#define APP_SECRET        ""
+#define TEMP_SENSOR_ID    ""
+#define DEVICE_ID_1       ""
+#define DEVICE_ID_2       ""
 #define EVENT_WAIT_TIME   10000               // send event every 10 seconds
 #define EEPROM_SIZE 512   // Define the size of EEPROM to store relay states
 #define RELAY_STATE_ADDR_START 0 // Starting address in EEPROM for relay states
 
-#define SCREEN_WIDTH 128 // OLED width
-#define SCREEN_HEIGHT 64 // OLED height
-
-#define OLED_RESET -1 // Reset pin (not used)
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// comment the following line if you use a toggle switches instead of tactile buttons
 #define TACTILE_BUTTON 1
 #define DHT_TYPE DHT11
 #define BAUD_RATE   115200
 #define DEBOUNCE_TIME 250
 #define RELAYPIN_1 16  // D0
-#define RELAYPIN_2 3   // RX
-#define SWITCHPIN_1 12  // D6
+#define RELAYPIN_2 5   // D1
+#define SWITCHPIN_1 4  // D2
 #define SWITCHPIN_2 0  // D3
 #define DHT_PIN     2  // D4
+#define WIFI_STATUS_CONNECTED_LED 14  // D5
+#define WIFI_STATUS_DISCONNECTED_LED 12  // D6
 #define IR_REC_PIN 13  // D7
+
+
+
 
 
 IRrecv irrecv(IR_REC_PIN);
@@ -66,248 +64,81 @@ float lastHumidity;                           // last known humidity (for compar
 unsigned long lastEvent = (-EVENT_WAIT_TIME); // last time event has been sent
 
 // for ir receiver
-unsigned long lastReceived = 0;  // Time of last received signal
-unsigned long debounceDelay = 200; // Delay in milliseconds (0.2 seconds)
+unsigned long lastReceived = 0;  
+unsigned long debounceDelay = 200; 
 
-
-typedef struct {      // struct for the std::map below
+typedef struct {  // struct for the std::map below
   int relayPIN;
   int flipSwitchPIN;
   bool activeLow;
 } deviceConfig_t;
 
-// this is the main configuration
-// please put in your deviceId, the PIN for Relay and PIN for flipSwitch
-// this can be up to N devices...depending on how much pin's available on your device ;)
-// right now we have 4 devicesIds going to 4 relays and 4 flip switches to switch the relay manually
 std::map<String, deviceConfig_t> devices = {
-    //{deviceId, {relayPIN,  flipSwitchPIN, activeLow}}
+  //{deviceId, {relayPIN,  flipSwitchPIN, activeLow}}
     {DEVICE_ID_1, {  RELAYPIN_1, SWITCHPIN_1, true }},
     {DEVICE_ID_2, {  RELAYPIN_2, SWITCHPIN_2, true }},
-       
 };
 
-typedef struct {      // struct for the std::map below
+typedef struct {    // struct for the std::map below
   String deviceId;
   bool lastFlipSwitchState;
   unsigned long lastFlipSwitchChange;
   bool activeLow;
 } flipSwitchConfig_t;
 
-std::map<int, flipSwitchConfig_t> flipSwitches;    // this map is used to map flipSwitch PINs to deviceId and handling debounce and last flipSwitch state checks
-                                                  // it will be setup in "setupFlipSwitches" function, using informations from devices map
+std::map<int, flipSwitchConfig_t> flipSwitches;
 
+// ===================== EEPROM HELPERS =====================
+void saveRelayStateToEEPROM(int relayIndex, bool state) {
+  int address = RELAY_STATE_ADDR_START + relayIndex;
+  EEPROM.write(address, state);
+  EEPROM.commit();
+#ifdef SERIAL_DEBUG
+  Serial.printf("Saved relay %d state: %s to EEPROM at address %d\r\n", relayIndex, state ? "ON" : "OFF", address);
+#endif
+}
+
+bool readRelayStateFromEEPROM(int relayIndex) {
+  int address = RELAY_STATE_ADDR_START + relayIndex;
+  return EEPROM.read(address);
+}
+
+// ===================== RELAY & FLIP SWITCH SETUP =====================
 void setupRelays() { 
-  int relayIndex = 0; // Index for the relays in the devices map
-  for (auto &device : devices) {           // for each device (relay, flipSwitch combination)
-    int relayPIN = device.second.relayPIN; // get the relay pin
-    pinMode(relayPIN, OUTPUT);             // set relay pin to OUTPUT
-    // Restore relay state from EEPROM
+  int relayIndex = 0;
+  for (auto &device : devices) {
+    int relayPIN = device.second.relayPIN;
+    pinMode(relayPIN, OUTPUT);
     bool relayState = readRelayStateFromEEPROM(relayIndex);
-    digitalWrite(relayPIN, relayState ? LOW : HIGH); // Active-low logic
+    digitalWrite(relayPIN, relayState ? LOW : HIGH);
+#ifdef SERIAL_DEBUG
     Serial.printf("Restored relay %d state: %s\r\n", relayIndex, relayState ? "ON" : "OFF");
+#endif
     relayIndex++;
   }
 }
 
-void saveRelayStateToEEPROM(int relayIndex, bool state) {
-  int address = RELAY_STATE_ADDR_START + relayIndex; // Calculate EEPROM address for the relay
-  EEPROM.write(address, state);                      // Write the relay state to EEPROM
-  EEPROM.commit();                                   // Commit changes to EEPROM
-  Serial.printf("Saved relay %d state: %s to EEPROM at address %d\r\n", relayIndex, state ? "ON" : "OFF", address);
-}
-
-bool readRelayStateFromEEPROM(int relayIndex) {
-  int address = RELAY_STATE_ADDR_START + relayIndex; // Calculate EEPROM address for the relay
-  return EEPROM.read(address);                       // Read the relay state from EEPROM
-}
-
 void setupFlipSwitches() {
-  for (auto &device : devices)  {                     // for each device (relay / flipSwitch combination)
-    flipSwitchConfig_t flipSwitchConfig;              // create a new flipSwitch configuration
+  for (auto &device : devices) {
+    flipSwitchConfig_t flipSwitchConfig;
+    flipSwitchConfig.deviceId = device.first;
+    flipSwitchConfig.lastFlipSwitchChange = 0;
+    flipSwitchConfig.lastFlipSwitchState = false;
+    int flipSwitchPIN = device.second.flipSwitchPIN;
+    bool activeLow = device.second.activeLow; 
+    flipSwitchConfig.activeLow = activeLow;
+    flipSwitches[flipSwitchPIN] = flipSwitchConfig;
 
-    flipSwitchConfig.deviceId = device.first;         // set the deviceId
-    flipSwitchConfig.lastFlipSwitchChange = 0;        // set debounce time
-    flipSwitchConfig.lastFlipSwitchState = false;     // set lastFlipSwitchState to false (LOW)
-    int flipSwitchPIN = device.second.flipSwitchPIN;  // get the flipSwitchPIN
-    bool activeLow = device.second.activeLow;         // set the activeLow
-    flipSwitchConfig.activeLow = activeLow;           
-    flipSwitches[flipSwitchPIN] = flipSwitchConfig;   // save the flipSwitch config to flipSwitches map
-    
-    if(activeLow) {
-      pinMode(flipSwitchPIN, INPUT_PULLUP);           // set the flipSwitch pin to INPUT_PULLUP
-    }
-    else {
-      pinMode(flipSwitchPIN, INPUT);                  // set the flipSwitch pin to INPUT  
-    } 
+    if(activeLow) pinMode(flipSwitchPIN, INPUT_PULLUP);
+    else pinMode(flipSwitchPIN, INPUT);
   }
 }
 
-bool onPowerState(String deviceId, bool &state) {
-  Serial.printf("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
-  int relayPIN = devices[deviceId].relayPIN; // get the relay pin for corresponding device
- // Active low logic: Turn relay on with LOW, off with HIGH
-  digitalWrite(relayPIN, state ? LOW : HIGH);
-  // Save relay state to EEPROM
-  int relayIndex = std::distance(devices.begin(), devices.find(deviceId)); // Get index of the relay
-  saveRelayStateToEEPROM(relayIndex, state);
-  
-  return true;
-}
-
-void handleFlipSwitches() {
-  unsigned long actualMillis = millis();                                          // Get current time in milliseconds
-  for (auto &flipSwitch : flipSwitches) {                                         // For each flipSwitch in flipSwitches map
-    int flipSwitchPIN = flipSwitch.first;                                         // Get the flip switch pin
-    bool lastFlipSwitchState = flipSwitch.second.lastFlipSwitchState;             // Get the last flipSwitch state
-    unsigned long lastFlipSwitchChange = flipSwitch.second.lastFlipSwitchChange;  // Get the timestamp when flipSwitch was pressed last time (used to debounce / limit events)
-
-    // Debounce logic: Check if sufficient time has passed since the last change
-    if (actualMillis - lastFlipSwitchChange > DEBOUNCE_TIME) {                    // If time is > debounce time...
-      // Read the current state of the flipSwitch
-      bool flipSwitchState = digitalRead(flipSwitchPIN);                          // Read the current flipSwitch state
-      if (flipSwitch.second.activeLow) {                                         
-        flipSwitchState = !flipSwitchState;                                       // Invert state if active low
-      }
-
-      // If the state has changed, handle the flipSwitch event
-      if (flipSwitchState != lastFlipSwitchState) {                               // If the flipSwitchState has changed...
-        flipSwitch.second.lastFlipSwitchState = flipSwitchState;                 // Update the last flipSwitch state
-        flipSwitch.second.lastFlipSwitchChange = actualMillis;                   // Update the last change time
-
-#ifdef TACTILE_BUTTON
-        if (flipSwitchState) {                                                   // If the tactile button is pressed
-#endif
-          String deviceId = flipSwitch.second.deviceId;                          // Get the associated device ID
-          int relayPIN = devices[deviceId].relayPIN;                             // Get the relay pin for the device
-          bool currentRelayState = digitalRead(relayPIN) == LOW;                 // Check current relay state (active low)
-
-          // Toggle the relay state
-          bool newRelayState = !currentRelayState;                               // Determine the new relay state
-          digitalWrite(relayPIN, newRelayState ? LOW : HIGH);                    // Update the relay state (active low logic)
-
-          // Save the new state to EEPROM
-          int relayIndex = std::distance(devices.begin(), devices.find(deviceId)); // Get the relay index
-          saveRelayStateToEEPROM(relayIndex, newRelayState);                      // Save the new relay state
-
-          // Send the new state to SinricPro
-          SinricProSwitch &mySwitch = SinricPro[deviceId];                        // Get Switch device from SinricPro
-          mySwitch.sendPowerStateEvent(newRelayState);                            // Send the event
-
-          // Debug output
-          Serial.printf("Flip switch toggled: Device %s, Relay %d -> %s\n", 
-                        deviceId.c_str(), relayPIN, newRelayState ? "ON" : "OFF"); // Log the toggle event
-#ifdef TACTILE_BUTTON
-        }
-#endif
-      }
-    }
-  }
-}
-
-
-void handleTemperaturesensor() {
-  unsigned long actualMillis = millis();
-  if (actualMillis - lastEvent < EVENT_WAIT_TIME) return; //only check every EVENT_WAIT_TIME milliseconds
-
-  if (SinricPro.isConnected() == false) {
-    Serial.printf("Not connected to Sinric Pro...!\r\n");
-    return; 
-  }
-
-  temperature = dht.readTemperature();          // get actual temperature in °C
-//  temperature = dht.getTemperature() * 1.8f + 32;  // get actual temperature in °F
-  humidity = dht.readHumidity();                // get actual humidity
-    // Serial.println(temperature);
-  if (isnan(temperature) || isnan(humidity)) { // reading failed... 
-    Serial.printf("DHT reading failed!\r\n");  // print error message
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0, 2);
-    display.println("DHT is not \n connected");                              // try again next time
-  }
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 2);
-  display.print("Temperature: ");
-  display.print(temperature);
-  display.println(" C\n");
-  display.print("Humidity: ");
-  display.print(humidity);
-  display.println("\n");
-  display.display();
-
-  if (temperature == lastTemperature || humidity == lastHumidity) return; // if no values changed do nothing...
-
-  SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];  // get temperaturesensor device
-  bool success = mySensor.sendTemperatureEvent(temperature, humidity); // send event
-  if (success) {  // if event was sent successfuly, print temperature and humidity to serial
-    Serial.printf("Temperature: %2.1f Celsius\tHumidity: %2.1f%%\r\n", temperature, humidity);
-  } else {  // if sending event failed, print error message
-    Serial.printf("Something went wrong...could not send Event to server!\r\n");
-  }
-
-  lastTemperature = temperature;  // save actual temperature for next compare
-  lastHumidity = humidity;        // save actual humidity for next compare
-  lastEvent = actualMillis;       // save actual time for next compare
-}
-
-
-void setupWiFi() {
-  Serial.printf("\r\n[Wifi]: Connecting");
-
-  #if defined(ESP8266)
-    WiFi.setSleepMode(WIFI_NONE_SLEEP); 
-    WiFi.setAutoReconnect(true);
-  #elif defined(ESP32)
-    WiFi.setSleep(false); 
-    WiFi.setAutoReconnect(true);
-  #endif
-
-  // Try connecting to the first WiFi network (VIRUS)
-  WiFi.begin(WIFI_SSID1, WIFI_PASS1);
-  
-  // Attempt to connect to the first WiFi for 10 seconds
-  unsigned long startAttemptTime = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - startAttemptTime >= 10000) {  // 10 seconds timeout
-      break;
-    }
-    delay(250);
-  }
-
-  // If connection to the first network fails, connect to the second one (404_Error)
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("\r\n[Wifi]: Could not connect to %s, switching to %s...\r\n", WIFI_SSID1, WIFI_SSID2);
-    WiFi.disconnect();  // Disconnect from the previous network
-    WiFi.begin(WIFI_SSID2, WIFI_PASS2);  // Connect to the second network (404_Error)
-    
-    // Try to connect to the second WiFi network for another 10 seconds
-    startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-      if (millis() - startAttemptTime >= 10000) {  // 10 seconds timeout
-        break;
-      }
-      delay(250);
-    }
-  }
-
-  // If still not connected, indicate failure
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("\r\n[Wifi]: Failed to connect to both networks.\r\n");
-    return;
-  }
-
-  // If connected, display the IP address and update LED status
-  Serial.printf("Connected to WiFi network: %s\r\n", WiFi.SSID().c_str());
-  Serial.printf("[WiFi]: IP Address: %s\r\n", WiFi.localIP().toString().c_str());
-}
-
-
+// ===================== TOGGLE RELAY FUNCTIONS =====================
 void toggleRelay(int relayIndex) {
   String deviceId = (relayIndex == 1) ? DEVICE_ID_1 : DEVICE_ID_2;
   int relayPIN = devices[deviceId].relayPIN;
-  bool currentRelayState = digitalRead(relayPIN) == LOW; // Active-low logic
+  bool currentRelayState = digitalRead(relayPIN) == LOW;
   bool newRelayState = !currentRelayState;
   digitalWrite(relayPIN, newRelayState ? LOW : HIGH);
   int index = std::distance(devices.begin(), devices.find(deviceId));
@@ -329,76 +160,235 @@ void toggleAllRelays() {
   }
 }
 
+// ===================== TEMPERATURE SENSOR HANDLER =====================
+void handleTemperaturesensor() {
+  unsigned long actualMillis = millis();
+  if (actualMillis - lastEvent < EVENT_WAIT_TIME) return;
+
+  if (!SinricPro.isConnected()) {
+#ifdef SERIAL_DEBUG
+    // Serial.printf("Not connected to Sinric Pro...!\r\n");
+#endif
+    return; 
+  }
+
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  if (isnan(temperature) || isnan(humidity)) return;
+  if (temperature == lastTemperature && humidity == lastHumidity) return;
+
+  SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];
+  bool success = mySensor.sendTemperatureEvent(temperature, humidity);
+#ifdef SERIAL_DEBUG
+  if (success)
+    Serial.printf("Temperature: %2.1f Celsius\tHumidity: %2.1f%%\r\n", temperature, humidity);
+  else
+    Serial.printf("Something went wrong...could not send Event to server!\r\n");
+#endif
+  lastTemperature = temperature;
+  lastHumidity = humidity;
+  lastEvent = actualMillis;
+}
+
+// ===================== WIFI (NON-BLOCKING) STATE =====================
+unsigned long wifiAttemptStart = 0;
+bool wifiTriedFirst = false;
+bool wifiTriedSecond = false;
+unsigned long wifiRetryInterval = 15000UL;
+
+void setupWiFi() {
+#ifdef SERIAL_DEBUG
+  Serial.printf("\r\n[Wifi]: Starting connect (non-blocking)\r\n");
+#endif
+
+  // pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
+  digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
+  // pinMode(WIFI_STATUS_DISCONNECTED_LED, OUTPUT);
+  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
+
+#if defined(ESP8266)
+  WiFi.setSleepMode(WIFI_NONE_SLEEP); 
+  WiFi.setAutoReconnect(true);
+#elif defined(ESP32)
+  WiFi.setSleep(false); 
+  WiFi.setAutoReconnect(true);
+#endif
+
+  WiFi.begin(WIFI_SSID1, WIFI_PASS1);
+  wifiAttemptStart = millis();
+  wifiTriedFirst = true;
+  wifiTriedSecond = false;
+}
+
+void handleWiFi() {
+  unsigned long now = millis();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(WIFI_STATUS_CONNECTED_LED, HIGH);
+    digitalWrite(WIFI_STATUS_DISCONNECTED_LED, LOW);
+    wifiTriedFirst = wifiTriedSecond = false;
+    return;
+  }
+
+  digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
+  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
+
+  if (wifiTriedFirst && !wifiTriedSecond && now - wifiAttemptStart >= 10000UL) {
+#ifdef SERIAL_DEBUG
+    Serial.printf("\n[Wifi]: Could not connect to %s, switching to %s...\r\n", WIFI_SSID1, WIFI_SSID2);
+#endif
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID2, WIFI_PASS2);
+    wifiAttemptStart = now;
+    wifiTriedSecond = true;
+    wifiTriedFirst = false;
+  } 
+  else if (wifiTriedSecond && now - wifiAttemptStart >= 10000UL) {
+#ifdef SERIAL_DEBUG
+    Serial.printf("\n[Wifi]: Failed to connect to both networks. Retrying again soon...\r\n");
+#endif
+    WiFi.disconnect();
+    delay(10);
+    WiFi.begin(WIFI_SSID1, WIFI_PASS1);
+    wifiAttemptStart = now;
+    wifiTriedFirst = true;
+    wifiTriedSecond = false;
+  }
+}
 
 
+
+// ===================== SINRIC PRO SETUP =====================
+bool onPowerState(String deviceId, bool &state) {
+#ifdef SERIAL_DEBUG
+  Serial.printf("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
+#endif
+  int relayPIN = devices[deviceId].relayPIN;
+  digitalWrite(relayPIN, state ? LOW : HIGH);
+  int relayIndex = std::distance(devices.begin(), devices.find(deviceId));
+  saveRelayStateToEEPROM(relayIndex, state);
+  return true;
+}
 
 void setupSinricPro() {
   SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];
-  // setup SinricPro
-  SinricPro.onConnected([](){ Serial.printf("Connected to SinricPro\r\n");
-  }); 
-  SinricPro.onDisconnected([](){ Serial.printf("Disconnected from SinricPro\r\n");
-
-   });
+  SinricPro.onConnected([]() {
+#ifdef SERIAL_DEBUG
+    Serial.printf("Connected to SinricPro\r\n");
+#endif
+    digitalWrite(WIFI_STATUS_CONNECTED_LED, HIGH);
+    digitalWrite(WIFI_STATUS_DISCONNECTED_LED, LOW);
+  });
+  SinricPro.onDisconnected([]() {
+#ifdef SERIAL_DEBUG
+    Serial.printf("Disconnected from SinricPro\r\n");
+#endif
+    digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
+    digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
+  });
   for (auto &device : devices) {
     const char *deviceId = device.first.c_str();
     SinricProSwitch &mySwitch = SinricPro[deviceId];
     mySwitch.onPowerState(onPowerState);
   }
-
-  
-  SinricPro.begin(APP_KEY, APP_SECRET);  
+  SinricPro.begin(APP_KEY, APP_SECRET);
 }
 
-void setup() {
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // 0x3C is I2C address
-    Serial.println(F("SSD1306 allocation failed"));
-    return;
-  }
-  display.clearDisplay();
-  // Set text size and color
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  // Set cursor to top-left
-  display.setCursor(0, 0);
-  // Display text
-  display.println("Booting...");
-  display.display();
+// ===================== INTERRUPT FLAGS & ISRs (with debounce for touch sensors) =====================
+volatile bool buttonPressedFlag1 = false;
+volatile bool buttonPressedFlag2 = false;
+volatile unsigned long lastInterruptTime1 = 0;
+volatile unsigned long lastInterruptTime2 = 0;
+const unsigned long interruptDebounceDelay = 400; // debounce for touch
 
+void IRAM_ATTR isrButton1() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastInterruptTime1 > interruptDebounceDelay) {
+    buttonPressedFlag1 = true;
+    lastInterruptTime1 = currentTime;
+  }
+}
+
+void IRAM_ATTR isrButton2() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastInterruptTime2 > interruptDebounceDelay) {
+    buttonPressedFlag2 = true;
+    lastInterruptTime2 = currentTime;
+  }
+}
+
+
+
+
+
+
+// ===================== SETUP =====================
+void setup() {
+// #ifdef SERIAL_DEBUG
   Serial.begin(BAUD_RATE);
-  EEPROM.begin(EEPROM_SIZE);                 // Initialize EEPROM
+// #endif
+  EEPROM.begin(EEPROM_SIZE);
+  pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
+  digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
+  pinMode(WIFI_STATUS_DISCONNECTED_LED, OUTPUT);
+  digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
+
   setupRelays();
   setupFlipSwitches();
   dht.begin();
+
+  pinMode(SWITCHPIN_1, INPUT_PULLUP);
+  pinMode(SWITCHPIN_2, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(SWITCHPIN_1), isrButton1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SWITCHPIN_2), isrButton2, FALLING);
+
   setupWiFi();
   setupSinricPro();
   irrecv.enableIRIn();
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("Welcome...");
-  display.display();
 }
+
+unsigned long lastWiFiHandle = 0;
+const unsigned long wifiHandleInterval = 180000UL; // 3 minutes
+// ===================== LOOP =====================
 
 void loop() {
   SinricPro.handle();
-  handleFlipSwitches();
+
+  // Run handleWiFi() every 3 minutes (non-blocking)
+  unsigned long now = millis();
+  if (now - lastWiFiHandle >= wifiHandleInterval) {
+    handleWiFi();
+    lastWiFiHandle = now;
+  }
+
+  if (buttonPressedFlag1) {
+    buttonPressedFlag1 = false;
+    toggleRelay(1);
+#ifdef SERIAL_DEBUG
+    Serial.println("ISR->handled: Relay 1 toggled (button)");
+#endif
+  }
+
+  if (buttonPressedFlag2) {
+    buttonPressedFlag2 = false;
+    toggleRelay(2);
+#ifdef SERIAL_DEBUG
+    Serial.println("ISR->handled: Relay 2 toggled (button)");
+#endif
+  }
+
   handleTemperaturesensor();
+
   if (irrecv.decode(&results)) {
     unsigned long currentTime = millis();
     if (currentTime - lastReceived > debounceDelay) {
+#ifdef SERIAL_DEBUG
       Serial.println(results.value, HEX);
-      
-      if (results.value == 0xFFB04F) {  // Relay 1 Hex Code
-        toggleRelay(1);
-      }
-      else if (results.value == 0xFFD827) {  // Relay 2 Hex Code
-        toggleRelay(2);
-      }
-      else if (results.value == 0xFF906F) {  // All relays On/Off
-        toggleAllRelays();
-      }
-      
-      lastReceived = currentTime;  // Update last received time
+#endif
+      if (results.value == 0xFFB04F) toggleRelay(1);
+      else if (results.value == 0xFFD827) toggleRelay(2);
+      else if (results.value == 0xFF906F) toggleAllRelays();
+      lastReceived = currentTime;
     }
     irrecv.resume();
   }
