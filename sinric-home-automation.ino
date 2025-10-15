@@ -5,7 +5,14 @@
   #define NDEBUG
 #endif 
 
-#define SERIAL_DEBUG
+// #define SERIAL_DEBUG
+#ifdef SERIAL_DEBUG
+  #define espdebug(...) Serial.printf(__VA_ARGS__)
+#else
+  #define espdebug(...)
+#endif
+
+
 
 #include <Arduino.h>
 #if defined(ESP8266)
@@ -56,11 +63,13 @@ char WIFI_PASS2[64] = "";
 
 #define CONFIG_BUTTON_PIN 0   // D3
 unsigned long buttonPressStart = 0;
-bool configModeActive = false;
+bool configModeActive = false;  // whether config mode is active (used by checkConfigButton)
 const unsigned long longPressTime = 10000UL; // 10 seconds
 
 unsigned long lastWiFiHandle = 0;
 const unsigned long wifiHandleInterval = 180000UL; // 3 minutes
+
+
 
 
 // Custom WiFiManager parameters for two SSIDs
@@ -69,6 +78,7 @@ WiFiManagerParameter custom_pass1("pass1", "Password1", "", 64);
 WiFiManagerParameter custom_ssid2("ssid2", "SSID2", "", 32);
 WiFiManagerParameter custom_pass2("pass2", "Password2", "", 64);
 #define EEPROM_WIFI_START 200  // pick an address far from your relay storage (0–99 used for relays, for example)
+const char* CONFIG_PORTAL_PASSWORD = "Aman@123";  // change to your desired password
 
 WiFiManager wm;
 
@@ -113,9 +123,9 @@ void saveRelayStateToEEPROM(int relayIndex, bool state) {
   int address = RELAY_STATE_ADDR_START + relayIndex;
   EEPROM.write(address, state);
   EEPROM.commit();
-#ifdef SERIAL_DEBUG
-  Serial.printf("Saved relay %d state: %s to EEPROM at address %d\r\n", relayIndex, state ? "ON" : "OFF", address);
-#endif
+
+  espdebug("Saved relay %d state: %s to EEPROM at address %d\r\n", relayIndex, state ? "ON" : "OFF", address);
+
 }
 
 bool readRelayStateFromEEPROM(int relayIndex) {
@@ -125,14 +135,12 @@ bool readRelayStateFromEEPROM(int relayIndex) {
 
 
 void loadWiFiFromEEPROM() {
-  Serial.println("loading wifi from eeprom: ");
 
   EEPROM.get(EEPROM_WIFI_START + 0, WIFI_SSID1);
   EEPROM.get(EEPROM_WIFI_START + 32, WIFI_PASS1);
   EEPROM.get(EEPROM_WIFI_START + 96, WIFI_SSID2);
   EEPROM.get(EEPROM_WIFI_START + 160, WIFI_PASS2);
 
-  Serial.println("loading wifi from eeprom: ");
   // // fallback if EEPROM empty
   // if (strlen(WIFI_SSID1) == 0) strcpy(WIFI_SSID1, "VIRUS");
   // if (strlen(WIFI_PASS1) == 0) strcpy(WIFI_PASS1, "VIRUS123");
@@ -157,9 +165,9 @@ void setupRelays() {
     pinMode(relayPIN, OUTPUT);
     bool relayState = readRelayStateFromEEPROM(relayIndex);
     digitalWrite(relayPIN, relayState ? LOW : HIGH);
-#ifdef SERIAL_DEBUG
-    Serial.printf("Restored relay %d state: %s\r\n", relayIndex, relayState ? "ON" : "OFF");
-#endif
+
+    espdebug("Restored relay %d state: %s\r\n", relayIndex, relayState ? "ON" : "OFF");
+
     relayIndex++;
   }
 }
@@ -212,9 +220,7 @@ void handleTemperaturesensor() {
   if (actualMillis - lastEvent < EVENT_WAIT_TIME) return;
 
   if (!SinricPro.isConnected()) {
-#ifdef SERIAL_DEBUG
-    // Serial.printf("Not connected to Sinric Pro...!\r\n");
-#endif
+    // espdebug("Not connected to Sinric Pro...!\r\n");
     return; 
   }
 
@@ -225,12 +231,12 @@ void handleTemperaturesensor() {
 
   SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];
   bool success = mySensor.sendTemperatureEvent(temperature, humidity);
-#ifdef SERIAL_DEBUG
+
   if (success)
-    Serial.printf("Temperature: %2.1f Celsius\tHumidity: %2.1f%%\r\n", temperature, humidity);
+    espdebug("Temperature: %2.1f Celsius\tHumidity: %2.1f%%\r\n", temperature, humidity);
   else
-    Serial.printf("Something went wrong...could not send Event to server!\r\n");
-#endif
+    espdebug("Something went wrong...could not send Event to server!\r\n");
+
   lastTemperature = temperature;
   lastHumidity = humidity;
   lastEvent = actualMillis;
@@ -243,18 +249,13 @@ bool wifiTriedSecond = false;
 unsigned long wifiRetryInterval = 15000UL;
 
 void setupWiFi() {
-#ifdef SERIAL_DEBUG
-  Serial.printf("\r\n[Wifi]: Starting connect (non-blocking)\r\n");
-#endif
-  Serial.print(" before restoring SSID: ");
-  Serial.println(WIFI_SSID1);
-  loadWiFiFromEEPROM(); // restore last saved SSID/password
-  Serial.print("After restoring SSID: ");
-  Serial.println(WIFI_SSID1);
 
-  // pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
+  espdebug("\r\n[Wifi]: Starting connect (non-blocking)\r\n");
+  loadWiFiFromEEPROM(); // restore last saved SSID/password
+
+
+  
   digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
-  // pinMode(WIFI_STATUS_DISCONNECTED_LED, OUTPUT);
   digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
 
 #if defined(ESP8266)
@@ -264,13 +265,25 @@ void setupWiFi() {
   WiFi.setSleep(false); 
   WiFi.setAutoReconnect(true);
 #endif
-  Serial.print("SSID: ");
-  Serial.println(WIFI_SSID1);
+  espdebug("SSID: ");
+  espdebug(WIFI_SSID1);
   WiFi.begin(WIFI_SSID1, WIFI_PASS1);
   wifiAttemptStart = millis();
   wifiTriedFirst = true;
   wifiTriedSecond = false;
 }
+
+
+// turn on both LEDs to show that the device is in config mode
+void deviceConfigIndicator() {
+  analogWrite(WIFI_STATUS_CONNECTED_LED, 200);
+  analogWrite(WIFI_STATUS_DISCONNECTED_LED, 10);
+  delay(2000);
+  analogWrite(WIFI_STATUS_CONNECTED_LED, 120);
+  analogWrite(WIFI_STATUS_DISCONNECTED_LED, 20);
+
+}
+
 
 void handleWiFi() {
   unsigned long now = millis();
@@ -286,9 +299,8 @@ void handleWiFi() {
   digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
 
   if (wifiTriedFirst && !wifiTriedSecond && now - wifiAttemptStart >= 10000UL) {
-#ifdef SERIAL_DEBUG
-    Serial.printf("\n[Wifi]: Could not connect to %s, switching to %s...\r\n", WIFI_SSID1, WIFI_SSID2);
-#endif
+
+    espdebug("\n[Wifi]: Could not connect to %s, switching to %s...\r\n", WIFI_SSID1, WIFI_SSID2);
     WiFi.disconnect();
     WiFi.begin(WIFI_SSID2, WIFI_PASS2);
     wifiAttemptStart = now;
@@ -296,9 +308,9 @@ void handleWiFi() {
     wifiTriedFirst = false;
   } 
   else if (wifiTriedSecond && now - wifiAttemptStart >= 10000UL) {
-#ifdef SERIAL_DEBUG
-    Serial.printf("\n[Wifi]: Failed to connect to both networks. Retrying again soon...\r\n");
-#endif
+
+    espdebug("\n[Wifi]: Failed to connect to both networks. Retrying again soon...\r\n");
+
     WiFi.disconnect();
     delay(10);
     WiFi.begin(WIFI_SSID1, WIFI_PASS1);
@@ -312,9 +324,9 @@ void handleWiFi() {
 
 // ===================== SINRIC PRO SETUP =====================
 bool onPowerState(String deviceId, bool &state) {
-#ifdef SERIAL_DEBUG
-  Serial.printf("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
-#endif
+
+  espdebug("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
+
   int relayPIN = devices[deviceId].relayPIN;
   digitalWrite(relayPIN, state ? LOW : HIGH);
   int relayIndex = std::distance(devices.begin(), devices.find(deviceId));
@@ -325,16 +337,16 @@ bool onPowerState(String deviceId, bool &state) {
 void setupSinricPro() {
   SinricProTemperaturesensor &mySensor = SinricPro[TEMP_SENSOR_ID];
   SinricPro.onConnected([]() {
-#ifdef SERIAL_DEBUG
-    Serial.printf("Connected to SinricPro\r\n");
-#endif
+
+    espdebug("Connected to SinricPro\r\n");
+
     digitalWrite(WIFI_STATUS_CONNECTED_LED, HIGH);
     digitalWrite(WIFI_STATUS_DISCONNECTED_LED, LOW);
   });
   SinricPro.onDisconnected([]() {
-#ifdef SERIAL_DEBUG
-    Serial.printf("Disconnected from SinricPro\r\n");
-#endif
+
+    espdebug("Disconnected from SinricPro\r\n");
+
     digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
     digitalWrite(WIFI_STATUS_DISCONNECTED_LED, HIGH);
   });
@@ -387,13 +399,15 @@ void checkConfigButton() {
     if (buttonPressStart == 0) buttonPressStart = millis();
     else if (!configModeActive && millis() - buttonPressStart > longPressTime) {
       configModeActive = true;
-#ifdef SERIAL_DEBUG
-      Serial.println("Entering WiFi config portal...");
-#endif
-      if (!wm.startConfigPortal("ESP_Config")) {
-#ifdef SERIAL_DEBUG
-        Serial.println("Config portal timeout, restarting...");
-#endif
+
+      espdebug("Entering WiFi config portal...");
+    
+      deviceConfigIndicator();
+        
+      if (!wm.startConfigPortal("SmartHomeConfig", CONFIG_PORTAL_PASSWORD)) {
+
+        espdebug("Config portal timeout, restarting...");
+
         ESP.restart();
       }
 
@@ -421,9 +435,9 @@ void checkConfigButton() {
 
 // ===================== SETUP =====================
 void setup() {
-// #ifdef SERIAL_DEBUG
+#ifdef SERIAL_DEBUG
   Serial.begin(BAUD_RATE);
-// #endif
+#endif
   EEPROM.begin(EEPROM_SIZE);
   pinMode(WIFI_STATUS_CONNECTED_LED, OUTPUT);
   digitalWrite(WIFI_STATUS_CONNECTED_LED, LOW);
@@ -466,20 +480,22 @@ void loop() {
   // Check if config button is held
   checkConfigButton();  
 
+
+
   if (buttonPressedFlag1) {
     buttonPressedFlag1 = false;
     toggleRelay(1);
-#ifdef SERIAL_DEBUG
-    Serial.println("ISR->handled: Relay 1 toggled (button)");
-#endif
+
+    espdebug("ISR->handled: Relay 1 toggled (button)");
+
   }
 
   if (buttonPressedFlag2) {
     buttonPressedFlag2 = false;
     toggleRelay(2);
-#ifdef SERIAL_DEBUG
-    Serial.println("ISR->handled: Relay 2 toggled (button)");
-#endif
+
+    espdebug("ISR->handled: Relay 2 toggled (button)");
+
   }
 
   handleTemperaturesensor();
@@ -487,9 +503,10 @@ void loop() {
   if (irrecv.decode(&results)) {
     unsigned long currentTime = millis();
     if (currentTime - lastReceived > debounceDelay) {
-#ifdef SERIAL_DEBUG
-      Serial.println(results.value, HEX);
-#endif
+
+      espdebug("IR value: 0x%llX\r\n", results.value);
+
+
       if (results.value == 0xFFB04F) toggleRelay(1);
       else if (results.value == 0xFFD827) toggleRelay(2);
       else if (results.value == 0xFF906F) toggleAllRelays();
