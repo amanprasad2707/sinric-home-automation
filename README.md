@@ -66,7 +66,7 @@ Each pin is defined in the source code for clarity and easy modification.
 3. **Upload:** Connect your ESP board to your computer and upload the code.  
 
 4. **Configure WiFi:**
-    * Hold the **config button** for 10 seconds to start the WiFi portal.
+    * Hold the **config button** (in this case that is flash button which is connected to GPIO0 or D3) for 10 seconds to start the WiFi portal.
     * On your phone or computer, connect to the WiFi network named **"SmartHomeConfig"**.  
       Use **`Aman@123`** as the portal password.
     * The configuration page will open automatically. In the **SSID** and **Password** fields, enter the WiFi credentials that are currently available and working (the library will try to connect to this immediately).  
